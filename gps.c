@@ -6,6 +6,7 @@
 
 typedef struct {
     FuriMutex* mutex;
+    bool connected;
     GpsStatus status;
     bool has_fix;
     GpsLocation location;
@@ -22,13 +23,24 @@ static void gps_location_callback(GpsStatus status, const GpsLocation* location,
     furi_mutex_release(gps_view->mutex);
 }
 
+static void gps_connection_callback(bool connected, void* context) {
+    GpsView* gps_view = context;
+    furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
+    gps_view->connected = connected;
+    if(!connected) gps_view->has_fix = false;
+    furi_mutex_release(gps_view->mutex);
+}
+
 static void render_callback(Canvas* canvas, void* context) {
     GpsView* gps_view = context;
     furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
 
     char buffer[64];
 
-    if(gps_view->status == GpsStatusNotSupported) {
+    if(!gps_view->connected) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "No phone connected");
+    } else if(gps_view->status == GpsStatusNotSupported) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(
             canvas, 64, 32, AlignCenter, AlignBottom, "Phone GPS not supported");
@@ -40,6 +52,7 @@ static void render_callback(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Waiting for fix...");
     } else {
+        // Fixed-point fields are scaled back to human units only here, at draw time.
         const GpsLocation* location = &gps_view->location;
 
         canvas_set_font(canvas, FontPrimary);
@@ -52,19 +65,19 @@ static void render_callback(Canvas* canvas, void* context) {
         canvas_draw_str_aligned(canvas, 96, 52, AlignCenter, AlignBottom, "Accuracy");
 
         canvas_set_font(canvas, FontSecondary);
-        snprintf(buffer, sizeof(buffer), "%f", location->latitude);
+        snprintf(buffer, sizeof(buffer), "%f", (double)location->latitude / (double)1e7);
         canvas_draw_str_aligned(canvas, 32, 18, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%f", location->longitude);
+        snprintf(buffer, sizeof(buffer), "%f", (double)location->longitude / (double)1e7);
         canvas_draw_str_aligned(canvas, 96, 18, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.1f", (double)location->heading);
+        snprintf(buffer, sizeof(buffer), "%.1f", (double)location->heading / (double)100.0);
         canvas_draw_str_aligned(canvas, 21, 40, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.2f m/s", (double)location->speed);
+        snprintf(buffer, sizeof(buffer), "%.2f m/s", (double)location->speed / (double)1000.0);
         canvas_draw_str_aligned(canvas, 64, 40, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.1f m", (double)location->altitude);
+        snprintf(buffer, sizeof(buffer), "%.1f m", (double)location->altitude / (double)100.0);
         canvas_draw_str_aligned(canvas, 107, 40, AlignCenter, AlignBottom, buffer);
         snprintf(buffer, sizeof(buffer), "%lu", location->satellites);
         canvas_draw_str_aligned(canvas, 32, 62, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.1f m", (double)location->accuracy);
+        snprintf(buffer, sizeof(buffer), "%.1f m", (double)location->accuracy / (double)1000.0);
         canvas_draw_str_aligned(canvas, 96, 62, AlignCenter, AlignBottom, buffer);
     }
 
@@ -87,7 +100,10 @@ int32_t gps_app(void* p) {
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
 
     Gps* gps = furi_record_open(RECORD_GPS);
+    gps_view->connected = gps_is_connected(gps);
     gps_set_location_callback(gps, gps_location_callback, gps_view);
+    gps_set_connection_callback(gps, gps_connection_callback, gps_view);
+    // Remembered by the service: resumes automatically across reconnects.
     gps_request_stream(gps, GPS_STREAM_FREQUENCY);
 
     ViewPort* view_port = view_port_alloc();
@@ -109,6 +125,7 @@ int32_t gps_app(void* p) {
 
     gps_stop_stream(gps);
     gps_set_location_callback(gps, NULL, NULL);
+    gps_set_connection_callback(gps, NULL, NULL);
     furi_record_close(RECORD_GPS);
 
     view_port_enabled_set(view_port, false);
