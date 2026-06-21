@@ -2,7 +2,8 @@
 #include <gui/gui.h>
 #include <gps/gps.h>
 
-#define GPS_STREAM_FREQUENCY 5
+#define GPS_STREAM_FREQUENCY 4
+#define GPS_POLL_PERIOD_MS 1000
 
 typedef struct {
     FuriMutex* mutex;
@@ -23,14 +24,6 @@ static void gps_location_callback(GpsStatus status, const GpsLocation* location,
     furi_mutex_release(gps_view->mutex);
 }
 
-static void gps_connection_callback(bool connected, void* context) {
-    GpsView* gps_view = context;
-    furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
-    gps_view->connected = connected;
-    if(!connected) gps_view->has_fix = false;
-    furi_mutex_release(gps_view->mutex);
-}
-
 static void render_callback(Canvas* canvas, void* context) {
     GpsView* gps_view = context;
     furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
@@ -39,20 +32,17 @@ static void render_callback(Canvas* canvas, void* context) {
 
     if(!gps_view->connected) {
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "No phone connected");
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "No USB/BLE connection");
     } else if(gps_view->status == GpsStatusNotSupported) {
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str_aligned(
-            canvas, 64, 32, AlignCenter, AlignBottom, "Phone GPS not supported");
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "GPS not available");
     } else if(gps_view->status == GpsStatusNoPermission) {
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str_aligned(
-            canvas, 64, 32, AlignCenter, AlignBottom, "Location permission denied");
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Permission denied");
     } else if(!gps_view->has_fix) {
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Waiting for fix...");
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Waiting for data...");
     } else {
-        // Fixed-point fields are scaled back to human units only here, at draw time.
         const GpsLocation* location = &gps_view->location;
 
         canvas_set_font(canvas, FontPrimary);
@@ -94,17 +84,14 @@ int32_t gps_app(void* p) {
 
     GpsView* gps_view = malloc(sizeof(GpsView));
     gps_view->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    gps_view->connected = false;
     gps_view->status = GpsStatusOk;
     gps_view->has_fix = false;
 
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
 
     Gps* gps = furi_record_open(RECORD_GPS);
-    gps_view->connected = gps_is_connected(gps);
     gps_set_location_callback(gps, gps_location_callback, gps_view);
-    gps_set_connection_callback(gps, gps_connection_callback, gps_view);
-    // Remembered by the service: resumes automatically across reconnects.
-    gps_request_stream(gps, GPS_STREAM_FREQUENCY);
 
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, render_callback, gps_view);
@@ -114,18 +101,28 @@ int32_t gps_app(void* p) {
     gui_add_view_port(gui, view_port, GuiLayerFullscreen);
 
     InputEvent event;
+    uint32_t next_poll = 0;
     for(bool processing = true; processing;) {
         if(furi_message_queue_get(event_queue, &event, 100) == FuriStatusOk) {
             if(event.type == InputTypeShort && event.key == InputKeyBack) {
                 processing = false;
             }
         }
+
+        if(furi_get_tick() >= next_poll) {
+            next_poll = furi_get_tick() + furi_ms_to_ticks(GPS_POLL_PERIOD_MS);
+            bool connected = gps_request_stream(gps, GPS_STREAM_FREQUENCY);
+            furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
+            gps_view->connected = connected;
+            if(!connected) gps_view->has_fix = false;
+            furi_mutex_release(gps_view->mutex);
+        }
+
         view_port_update(view_port);
     }
 
     gps_stop_stream(gps);
     gps_set_location_callback(gps, NULL, NULL);
-    gps_set_connection_callback(gps, NULL, NULL);
     furi_record_close(RECORD_GPS);
 
     view_port_enabled_set(view_port, false);
