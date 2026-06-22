@@ -17,9 +17,9 @@
  * This is sample code for the GPS service API, not a full navigation app.
  */
 
-#define GPS_STREAM_FREQUENCY 4
-#define GPS_POLL_PERIOD_MS   1000
-#define GPS_STREAM_TIMEOUT_MS 1500
+#define GPS_STREAM_FREQUENCY    4
+#define GPS_POLL_PERIOD_MS      1000
+#define GPS_STREAM_TIMEOUT_MS   5000
 
 typedef struct {
     FuriMutex* mutex;
@@ -48,7 +48,9 @@ static void gps_view_reset_locked(GpsView* gps_view) {
  * status describes the companion-side GPS result:
  * - GpsStatusOk with a non-NULL location means a valid fix/update arrived;
  * - GpsStatusNotSupported means the companion has no GPS provider;
- * - GpsStatusNoPermission means the companion denied location access.
+ * - GpsStatusNoPermission means the companion denied location access;
+ * - GpsStatusDisabled means the companion's location services are off;
+ * - GpsStatusUnknown means the companion hit an undetermined location error.
  */
 static void gps_location_callback(GpsStatus status, const GpsLocation* location, void* context) {
     GpsView* gps_view = context;
@@ -81,6 +83,12 @@ static void render_callback(Canvas* canvas, void* context) {
     } else if(gps_view->status == GpsStatusNoPermission) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Permission denied");
+    } else if(gps_view->status == GpsStatusDisabled) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Location disabled");
+    } else if(gps_view->status == GpsStatusUnknown) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Location error");
     } else if(!gps_view->has_fix) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignBottom, "Waiting for data...");
