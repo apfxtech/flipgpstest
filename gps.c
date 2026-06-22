@@ -2,8 +2,24 @@
 #include <gui/gui.h>
 #include <gps/gps.h>
 
+/*
+ * Demonstration app for the firmware GPS service.
+ *
+ * The service is exposed through RECORD_GPS and receives location data from the
+ * companion over RPC. The application intentionally keeps the flow explicit:
+ *
+ * 1. Open RECORD_GPS.
+ * 2. Register a GpsLocationCallback.
+ * 3. Request a location stream with gps_request_stream().
+ * 4. Render the latest GpsLocation or service status.
+ * 5. Stop the stream and unregister the callback before exit.
+ *
+ * This is sample code for the GPS service API, not a full navigation app.
+ */
+
 #define GPS_STREAM_FREQUENCY 4
-#define GPS_POLL_PERIOD_MS 1000
+#define GPS_POLL_PERIOD_MS   1000
+#define GPS_STREAM_TIMEOUT_MS 1500
 
 typedef struct {
     FuriMutex* mutex;
@@ -11,51 +27,41 @@ typedef struct {
     GpsStatus status;
     bool has_fix;
     GpsLocation location;
+    uint32_t last_location_tick;
 } GpsView;
 
-static uint32_t gps_abs_i32(int32_t value) {
-    return (value < 0) ? (uint32_t)(-(value + 1)) + 1 : (uint32_t)value;
+/*
+ * Reset only the demo app state. This does not talk to the GPS service.
+ * Call gps_stop_stream() separately first when a live stream must be closed.
+ */
+static void gps_view_reset_locked(GpsView* gps_view) {
+    gps_view->connected = false;
+    gps_view->status = GpsStatusOk;
+    gps_view->has_fix = false;
+    gps_view->location = (GpsLocation){0};
+    gps_view->last_location_tick = 0;
 }
 
-static void gps_format_fixed_i32(
-    char* buffer,
-    size_t buffer_size,
-    int32_t value,
-    uint32_t scale,
-    uint8_t decimals) {
-    uint32_t abs_value = gps_abs_i32(value);
-    snprintf(
-        buffer,
-        buffer_size,
-        "%s%lu.%0*lu",
-        value < 0 ? "-" : "",
-        (unsigned long)(abs_value / scale),
-        decimals,
-        (unsigned long)(abs_value % scale));
-}
-
-static void gps_format_fixed_u32(
-    char* buffer,
-    size_t buffer_size,
-    uint32_t value,
-    uint32_t scale,
-    uint8_t decimals) {
-    snprintf(
-        buffer,
-        buffer_size,
-        "%lu.%0*lu",
-        (unsigned long)(value / scale),
-        decimals,
-        (unsigned long)(value % scale));
-}
-
+/*
+ * GPS service callback.
+ *
+ * status describes the companion-side GPS result:
+ * - GpsStatusOk with a non-NULL location means a valid fix/update arrived;
+ * - GpsStatusNotSupported means the companion has no GPS provider;
+ * - GpsStatusNoPermission means the companion denied location access.
+ */
 static void gps_location_callback(GpsStatus status, const GpsLocation* location, void* context) {
     GpsView* gps_view = context;
     furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
+    gps_view->connected = true;
     gps_view->status = status;
+    gps_view->last_location_tick = furi_get_tick();
     if(status == GpsStatusOk && location) {
         gps_view->location = *location;
         gps_view->has_fix = true;
+    } else {
+        gps_view->has_fix = false;
+        gps_view->location = (GpsLocation){0};
     }
     furi_mutex_release(gps_view->mutex);
 }
@@ -91,21 +97,33 @@ static void render_callback(Canvas* canvas, void* context) {
         canvas_draw_str_aligned(canvas, 96, 52, AlignCenter, AlignBottom, "Accuracy");
 
         canvas_set_font(canvas, FontSecondary);
-        gps_format_fixed_i32(buffer, sizeof(buffer), location->latitude, 10000000, 7);
+
+        // coordinate
+        gps_location_format_coordinate(buffer, sizeof(buffer), location->latitude);
         canvas_draw_str_aligned(canvas, 32, 18, AlignCenter, AlignBottom, buffer);
-        gps_format_fixed_i32(buffer, sizeof(buffer), location->longitude, 10000000, 7);
+        gps_location_format_coordinate(buffer, sizeof(buffer), location->longitude);
         canvas_draw_str_aligned(canvas, 96, 18, AlignCenter, AlignBottom, buffer);
-        gps_format_fixed_u32(buffer, sizeof(buffer), location->heading / 10, 10, 1);
+
+        // heading
+        gps_location_format_heading(buffer, sizeof(buffer), location->heading);
         canvas_draw_str_aligned(canvas, 21, 40, AlignCenter, AlignBottom, buffer);
-        gps_format_fixed_u32(buffer, sizeof(buffer), location->speed / 10, 100, 2);
+
+        // speed
+        gps_location_format_speed(buffer, sizeof(buffer), location->speed);
         strlcat(buffer, " m/s", sizeof(buffer));
         canvas_draw_str_aligned(canvas, 64, 40, AlignCenter, AlignBottom, buffer);
-        gps_format_fixed_i32(buffer, sizeof(buffer), location->altitude / 10, 10, 1);
+
+        // altitude
+        gps_location_format_altitude(buffer, sizeof(buffer), location->altitude);
         strlcat(buffer, " m", sizeof(buffer));
         canvas_draw_str_aligned(canvas, 107, 40, AlignCenter, AlignBottom, buffer);
+
+        // satellites
         snprintf(buffer, sizeof(buffer), "%lu", location->satellites);
         canvas_draw_str_aligned(canvas, 32, 62, AlignCenter, AlignBottom, buffer);
-        gps_format_fixed_u32(buffer, sizeof(buffer), location->accuracy / 100, 10, 1);
+
+        // accuracy
+        gps_location_format_accuracy(buffer, sizeof(buffer), location->accuracy);
         strlcat(buffer, " m", sizeof(buffer));
         canvas_draw_str_aligned(canvas, 96, 62, AlignCenter, AlignBottom, buffer);
     }
@@ -123,12 +141,14 @@ int32_t gps_app(void* p) {
 
     GpsView* gps_view = malloc(sizeof(GpsView));
     gps_view->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-    gps_view->connected = false;
-    gps_view->status = GpsStatusOk;
-    gps_view->has_fix = false;
+    gps_view_reset_locked(gps_view);
 
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
 
+    /*
+     * RECORD_GPS is the public firmware service handle. Applications do not
+     * parse RPC directly; they use this service API and receive GpsLocation.
+     */
     Gps* gps = furi_record_open(RECORD_GPS);
     gps_set_location_callback(gps, gps_location_callback, gps_view);
 
@@ -149,17 +169,47 @@ int32_t gps_app(void* p) {
         }
 
         if(furi_get_tick() >= next_poll) {
-            next_poll = furi_get_tick() + furi_ms_to_ticks(GPS_POLL_PERIOD_MS);
+            uint32_t now = furi_get_tick();
+            next_poll = now + furi_ms_to_ticks(GPS_POLL_PERIOD_MS);
+
+            /*
+             * gps_request_stream() asks the companion to stream location data.
+             * Its return value means the command was sent through a live GPS
+             * bridge, not that a fresh fix has already arrived.
+             */
             bool connected = gps_request_stream(gps, GPS_STREAM_FREQUENCY);
             furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
-            gps_view->connected = connected;
-            if(!connected) gps_view->has_fix = false;
+            bool stop_stream = false;
+            if(connected) {
+                /*
+                 * If the bridge is alive but callbacks stopped, close the
+                 * broken stream before clearing UI state. The next poll cycle
+                 * will request a new stream from a clean state.
+                 */
+                if(gps_view->connected && gps_view->last_location_tick &&
+                   now - gps_view->last_location_tick > furi_ms_to_ticks(GPS_STREAM_TIMEOUT_MS)) {
+                    stop_stream = true;
+                }
+            } else {
+                gps_view_reset_locked(gps_view);
+            }
             furi_mutex_release(gps_view->mutex);
+
+            if(stop_stream) {
+                gps_stop_stream(gps);
+                furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
+                gps_view_reset_locked(gps_view);
+                furi_mutex_release(gps_view->mutex);
+            }
         }
 
         view_port_update(view_port);
     }
 
+    /*
+     * Shut down in reverse order: stop the companion stream, detach the service
+     * callback, then close RECORD_GPS.
+     */
     gps_stop_stream(gps);
     gps_set_location_callback(gps, NULL, NULL);
     furi_record_close(RECORD_GPS);
