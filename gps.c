@@ -13,6 +13,42 @@ typedef struct {
     GpsLocation location;
 } GpsView;
 
+static uint32_t gps_abs_i32(int32_t value) {
+    return (value < 0) ? (uint32_t)(-(value + 1)) + 1 : (uint32_t)value;
+}
+
+static void gps_format_fixed_i32(
+    char* buffer,
+    size_t buffer_size,
+    int32_t value,
+    uint32_t scale,
+    uint8_t decimals) {
+    uint32_t abs_value = gps_abs_i32(value);
+    snprintf(
+        buffer,
+        buffer_size,
+        "%s%lu.%0*lu",
+        value < 0 ? "-" : "",
+        (unsigned long)(abs_value / scale),
+        decimals,
+        (unsigned long)(abs_value % scale));
+}
+
+static void gps_format_fixed_u32(
+    char* buffer,
+    size_t buffer_size,
+    uint32_t value,
+    uint32_t scale,
+    uint8_t decimals) {
+    snprintf(
+        buffer,
+        buffer_size,
+        "%lu.%0*lu",
+        (unsigned long)(value / scale),
+        decimals,
+        (unsigned long)(value % scale));
+}
+
 static void gps_location_callback(GpsStatus status, const GpsLocation* location, void* context) {
     GpsView* gps_view = context;
     furi_mutex_acquire(gps_view->mutex, FuriWaitForever);
@@ -55,19 +91,22 @@ static void render_callback(Canvas* canvas, void* context) {
         canvas_draw_str_aligned(canvas, 96, 52, AlignCenter, AlignBottom, "Accuracy");
 
         canvas_set_font(canvas, FontSecondary);
-        snprintf(buffer, sizeof(buffer), "%f", (double)location->latitude / (double)1e7);
+        gps_format_fixed_i32(buffer, sizeof(buffer), location->latitude, 10000000, 7);
         canvas_draw_str_aligned(canvas, 32, 18, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%f", (double)location->longitude / (double)1e7);
+        gps_format_fixed_i32(buffer, sizeof(buffer), location->longitude, 10000000, 7);
         canvas_draw_str_aligned(canvas, 96, 18, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.1f", (double)location->heading / (double)100.0);
+        gps_format_fixed_u32(buffer, sizeof(buffer), location->heading / 10, 10, 1);
         canvas_draw_str_aligned(canvas, 21, 40, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.2f m/s", (double)location->speed / (double)1000.0);
+        gps_format_fixed_u32(buffer, sizeof(buffer), location->speed / 10, 100, 2);
+        strlcat(buffer, " m/s", sizeof(buffer));
         canvas_draw_str_aligned(canvas, 64, 40, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.1f m", (double)location->altitude / (double)100.0);
+        gps_format_fixed_i32(buffer, sizeof(buffer), location->altitude / 10, 10, 1);
+        strlcat(buffer, " m", sizeof(buffer));
         canvas_draw_str_aligned(canvas, 107, 40, AlignCenter, AlignBottom, buffer);
         snprintf(buffer, sizeof(buffer), "%lu", location->satellites);
         canvas_draw_str_aligned(canvas, 32, 62, AlignCenter, AlignBottom, buffer);
-        snprintf(buffer, sizeof(buffer), "%.1f m", (double)location->accuracy / (double)1000.0);
+        gps_format_fixed_u32(buffer, sizeof(buffer), location->accuracy / 100, 10, 1);
+        strlcat(buffer, " m", sizeof(buffer));
         canvas_draw_str_aligned(canvas, 96, 62, AlignCenter, AlignBottom, buffer);
     }
 
