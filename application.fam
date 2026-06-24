@@ -3,6 +3,7 @@ App(
     name="[RPC] GPS",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="gps_app",
+    sources=["gps.c"],
     requires=["gui"],
     stack_size=2 * 1024,
     order=35,
@@ -11,4 +12,36 @@ App(
     fap_author="@ezod & @xMasterX & @apfxtech",
     fap_version="3.0",
     fap_description="Shows the companion device location over RPC (GPS API, 4 Hz stream).",
+)
+
+App(
+    appid="gps_rpc_spoof",
+    name="[RPC] GPS Spoof",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="gps_spoof_app",
+    sources=["gps_spoof.c"],
+    requires=["gui"],
+    stack_size=2 * 1024,
+    order=36,
+    fap_icon="gps_10px.png",
+    fap_category="Tools",
+    fap_author="@ezod & @xMasterX & @apfxtech",
+    fap_version="1.0",
+    fap_description="Reports spoofed circular location over RPC once per second.",
+)
+
+App(
+    appid="gps_rpc_once",
+    name="[RPC] GPS Once",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="gps_once_app",
+    sources=["gps_once.c"],
+    requires=["gui"],
+    stack_size=2 * 1024,
+    order=37,
+    fap_icon="gps_10px.png",
+    fap_category="Tools",
+    fap_author="@ezod & @xMasterX & @apfxtech",
+    fap_version="1.0",
+    fap_description="Requests companion device location over RPC on OK button press.",
 )
